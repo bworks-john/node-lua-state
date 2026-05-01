@@ -42,6 +42,8 @@ namespace {
 
 } // namespace
 
+volatile int LuaStateContext::nextId_ = 0;
+
 /**
  * Napi Initializer
  */
@@ -54,17 +56,62 @@ void LuaStateContext::Init(Napi::Env env, Napi::Object _exports) {
 /**
  * Constructor
  */
-LuaStateContext::LuaStateContext() {
-  L_ = luaL_newstate();
-  contexts_[L_] = this;
+LuaStateContext::LuaStateContext(Napi::Env* env) {
+
+  int i = LuaStateContext::nextId_ % MAX_MMC_SLOTS, k = 0, flag = 1;
+  while (flag == 1 && !(flag = 0) && k++ < MAX_MMC_SLOTS && i++ >= 0) {
+    for (std::pair<lua_State* const, LuaStateContext*> it : LuaStateContext::contexts_) {
+      if (it.second->instanceId == i) {
+        flag = 1;
+        break;
+      }
+    }
+  }
+
+  LuaStateContext::nextId_ = 1 + i;
+
+  this->instanceId = i;
+
+  this->allocated_bytes = 0;
+  this->peak_allocated_bytes = 0;
+  this->max_permitted_bytes = 0;
+
+  this->timer_running = false;
+  this->timer_reentrant_depth = 0;
+
+  this->elapsed_seconds.tv_sec = this->elapsed_seconds.tv_nsec = 0;
+  this->timer_last_start.tv_sec = this->timer_last_start.tv_nsec = 0;
+  this->timer_last_stop.tv_sec = this->timer_last_stop.tv_nsec = 0;
+
+  this->max_execution_seconds = 0;
+
+  this->jsAllocatorFunc_ = nullptr;
+
+  if (LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, this, std::make_index_sequence<MAX_MMC_SLOTS>{})) {
+
+    L_ = lua_newstate(LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].alloc, this);
+    if (L_) {
+      lua_atpanic(L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].panic);
+      lua_sethook(L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].debug, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE, 1);
+      contexts_[L_] = this;
+    } else {
+      L_ = nullptr;
+    }
+  }
 }
 
 /**
  * Destructor
  */
 LuaStateContext::~LuaStateContext() {
-  contexts_.erase(L_);
-  lua_close(L_);
+  this->jsAllocatorFunc_ = nullptr;
+
+  if (L_ != nullptr) {
+    LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, nullptr, std::make_index_sequence<MAX_MMC_SLOTS>{});
+    contexts_.erase(L_);
+    lua_close(L_);
+    L_ = nullptr;
+  }
 }
 
 LuaStateContext* LuaStateContext::From(lua_State* L) {
@@ -244,6 +291,181 @@ Napi::Function LuaStateContext::FindOrCreateJsFunction(const Napi::Env& env, int
   js_functions_cache_.emplace(lua_function_ptr, js_function);
 
   return js_function;
+}
+
+Napi::Value LuaStateContext::SetMemoryManagedContextAllocatorCallback(const Napi::Env& env, const Napi::Value& value) {
+  auto value_type = value.Type();
+  if (value_type == napi_null) {
+    jsAllocatorFunc_ = nullptr;
+    return Napi::Boolean::New(env, true);
+  } else if (value_type == napi_function) {
+    jsAllocatorFunc_ = new Napi::FunctionReference(Napi::Persistent(value.As<Napi::Function>()));
+    return Napi::Boolean::New(env, true);
+  } else {
+    Napi::Error::New(env, "memory allocation callback must be a function or null").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+}
+
+uint64_t LuaStateContext::GetAllocatedBytes() { return this->allocated_bytes; }
+
+uint64_t LuaStateContext::GetPeakAllocatedBytes() { return this->peak_allocated_bytes; }
+
+uint64_t LuaStateContext::GetMaxPermittedBytes() { return this->max_permitted_bytes; }
+
+uint64_t LuaStateContext::SetMaxPermittedBytes(uint64_t size) {
+  uint64_t old_max_permitted_bytes = this->max_permitted_bytes;
+  this->max_permitted_bytes = size;
+  return old_max_permitted_bytes;
+}
+
+long LuaStateContext::GetCurrentElapsedTime() { return this->elapsed_seconds.tv_sec; }
+
+long LuaStateContext::SetMaxPermittedTime(long max_seconds) {
+  long old_max_execution_seconds = this->max_execution_seconds;
+  this->max_execution_seconds = max_seconds;
+  return old_max_execution_seconds;
+}
+
+bool LuaStateContext::ResetElapsedClock(bool throw_if_locked) {
+  if (throw_if_locked && this->timer_reentrant_depth > 0) {
+    throw new IllegalOperationException;
+  }
+
+  this->elapsed_seconds.tv_sec = this->elapsed_seconds.tv_nsec = 0;
+  return true;
+}
+
+int LuaStateContext::UpdateAccounting(size_t osize, size_t nsize) {
+  if (this->max_permitted_bytes == 0)
+    return 1;
+
+  if (nsize > osize && (nsize > this->max_permitted_bytes || this->allocated_bytes + nsize > this->max_permitted_bytes)) {
+    return 0;
+  }
+
+  if (osize > nsize && this->allocated_bytes + nsize < osize) {
+    return 1;
+  }
+
+  this->allocated_bytes += nsize - osize;
+
+  if (this->allocated_bytes > this->peak_allocated_bytes) {
+    this->peak_allocated_bytes = this->allocated_bytes;
+  }
+
+  return 1;
+}
+
+void* LuaStateContext::AllocateMemoryForLua(void* ud, void* ptr, size_t osize, size_t nsize) {
+  bool perform_allocation = true;
+
+  if (nsize > 0) {
+    if (this->jsAllocatorFunc_ != nullptr && !this->jsAllocatorFunc_->IsEmpty()) {
+      try {
+        Napi::Env env = this->jsAllocatorFunc_->Env();
+        Napi::HandleScope scope(env);
+
+        std::vector<napi_value> js_args;
+        js_args.push_back(Napi::Number::New(env, this->instanceId));
+
+        js_args.push_back(Napi::BigInt::New(env, this->allocated_bytes));
+        js_args.push_back(Napi::BigInt::New(env, this->peak_allocated_bytes));
+        js_args.push_back(Napi::BigInt::New(env, this->max_permitted_bytes));
+
+        js_args.push_back(Napi::Number::New(env, nsize));
+
+        Napi::Value js_function_result = this->jsAllocatorFunc_->Call(js_args);
+
+        if (js_function_result.IsBoolean()) {
+          Napi::Boolean js_allows_allocation = js_function_result.As<Napi::Boolean>();
+          perform_allocation = js_allows_allocation.Value();
+        } else {
+          perform_allocation = false;
+        }
+      } catch (const Napi::Error& e) {
+        std::string msg;
+        auto stack_value = e.Get("stack");
+
+        if (stack_value.IsString()) {
+          msg = stack_value.As<Napi::String>().Utf8Value();
+        } else {
+          auto name_value = e.Get("name");
+          std::string name = name_value.IsString() ? name_value.As<Napi::String>().Utf8Value() : "Error";
+          msg = name + ": " + e.Message();
+        }
+
+        fprintf(stderr, "failed to check allocation guard: %s", msg.c_str());
+        perform_allocation = false;
+      } catch (const std::exception& e) {
+        fprintf(stderr, "failed to check allocation guard: %s", e.what());
+        perform_allocation = false;
+      } catch (...) {
+        fprintf(stderr, "failed to check allocation guard: unspecified exception");
+        perform_allocation = false;
+      }
+    }
+
+    if (perform_allocation) {
+      if (this->UpdateAccounting(osize, nsize) <= 0) {
+        perform_allocation = false;
+      }
+    }
+  } else {
+    perform_allocation = true;
+  }
+
+  if (perform_allocation) {
+    if (nsize == 0) {
+      free(ptr);
+      return NULL;
+    } else {
+      this->allocated_bytes += nsize;
+      void* mp = realloc(ptr, nsize);
+      return mp;
+    }
+  } else {
+    free(ptr);
+    return NULL;
+  }
+}
+
+int LuaStateContext::PanicFromLua(lua_State* state) {
+  throw new PanicFromLuaException;
+  return 0; /* unreach */
+}
+
+void LuaStateContext::HookFromLua(lua_State* state, lua_Debug* debug) {
+  if (this->max_execution_seconds > 0 && this->elapsed_seconds.tv_sec > this->max_execution_seconds) {
+    throw new OutOfTimeException;
+  }
+}
+
+void LuaStateContext::OnContextSwitch(VMType origin, VMType target, CrossVMCallBoundaryInfo* cinfo) {
+  if (origin == VMType::NAPI && target == VMType::LVM) {
+    this->timer_reentrant_depth++;
+    this->timer_running = true;
+    clock_gettime(CLOCK_MONOTONIC, &this->timer_last_start);
+  }
+
+  if (origin == VMType::LVM && target == VMType::NAPI) {
+    if (this->timer_reentrant_depth < 0) {
+      this->timer_reentrant_depth--;
+    }
+
+    if (this->timer_running) {
+      this->timer_running = false;
+      clock_gettime(CLOCK_MONOTONIC, &this->timer_last_stop);
+
+      this->elapsed_seconds.tv_sec += this->timer_last_stop.tv_sec - this->timer_last_start.tv_sec;
+      this->elapsed_seconds.tv_nsec += this->timer_last_stop.tv_nsec - this->timer_last_start.tv_nsec;
+
+      while (this->elapsed_seconds.tv_nsec > 1000000000L) {
+        this->elapsed_seconds.tv_nsec -= 1000000000L;
+        this->elapsed_seconds.tv_sec++;
+      }
+    }
+  }
 }
 
 namespace {
@@ -524,7 +746,33 @@ namespace {
     lua_insert(L, function_index);
     ++pivot_index;
 
+    LuaStateContext* ctx = LuaStateContext::From(L);
+    CrossVMCallBoundaryInfo* cinfo = (CrossVMCallBoundaryInfo*)malloc(sizeof(CrossVMCallBoundaryInfo));
+
+    // prepare cross-VM closure information
+    if (cinfo != nullptr) {
+      cinfo->L = L;
+      cinfo->env = &env;
+    }
+
+    // fire cross-VM closure traversal notice
+    if (ctx != nullptr) {
+      ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+    } else {
+      fprintf(stderr, "WARN: can't find context for lua_State at %p!", L);
+    }
+
+    // call lua function on stack
     int function_call_status = lua_pcall(L, args_count, LUA_MULTRET, function_index);
+
+    // fire cross-VM closure traversal notice
+    if (ctx != nullptr) {
+      ctx->OnContextSwitch(VMType::NAPI, VMType::LVM, cinfo);
+      if (cinfo != nullptr) {
+        free(cinfo);
+      }
+    }
+
     if (function_call_status != LUA_OK) {
       return PopErrorFromStack(L, env);
     }
@@ -620,6 +868,9 @@ namespace {
       return luaL_error(L, "Invalid js-function reference");
     }
 
+    LuaStateContext* ctx = LuaStateContext::From(L);
+    CrossVMCallBoundaryInfo* cinfo = (CrossVMCallBoundaryInfo*)malloc(sizeof(CrossVMCallBoundaryInfo));
+
     try {
       Napi::Env env = js_function_holder->ref->Env();
       Napi::HandleScope scope(env);
@@ -634,8 +885,29 @@ namespace {
         js_args.push_back(js_arg);
       }
 
+      // prepare cross-VM closure information
+      if (cinfo != nullptr) {
+        cinfo->L = L;
+        cinfo->env = &env;
+      }
+
+      // fire cross-VM closure traversal notice
+      if (ctx != nullptr) {
+        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+      } else {
+        fprintf(stderr, "WARN: can't find context for lua_State at %p!", L);
+      }
+
       // call js function
       Napi::Value js_function_result = js_function_holder->ref->Call(js_args);
+
+      // fire cross-VM closure traversal notice
+      if (ctx != nullptr) {
+        ctx->OnContextSwitch(VMType::NAPI, VMType::LVM, cinfo);
+        if (cinfo != nullptr) {
+          free(cinfo);
+        }
+      }
 
       // return function call result to lua
       if (js_function_result.IsArray()) {
@@ -662,10 +934,29 @@ namespace {
         msg = name + ": " + e.Message();
       }
 
+      if (ctx != nullptr) {
+        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+        if (cinfo != nullptr) {
+          free(cinfo);
+        }
+      }
+
       return luaL_error(L, msg.c_str());
     } catch (const std::exception& e) {
+      if (ctx != nullptr) {
+        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+        if (cinfo != nullptr) {
+          free(cinfo);
+        }
+      }
       return luaL_error(L, e.what());
     } catch (...) {
+      if (ctx != nullptr) {
+        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+        if (cinfo != nullptr) {
+          free(cinfo);
+        }
+      }
       return luaL_error(L, "Unknown error from JS function");
     }
   }

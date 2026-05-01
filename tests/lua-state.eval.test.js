@@ -13,6 +13,25 @@ describe(`${LuaState.name}#${LuaState.prototype.eval.name}`, () => {
 
   beforeEach(() => {
     luaState = new LuaState()
+    luaState.setMemoryCallback(
+      (
+        instanceId,
+        allocatedBytes,
+        peakAllocatedBytes,
+        maxPermittedBytes,
+        allocationRequestedBytes,
+      ) => {
+        console.log(
+          'doHeapAllocate:',
+          instanceId,
+          allocatedBytes,
+          peakAllocatedBytes,
+          maxPermittedBytes,
+          allocationRequestedBytes,
+        )
+        return true
+      },
+    )
   })
 
   describe('without return', () => {

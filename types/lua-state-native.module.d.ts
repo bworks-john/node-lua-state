@@ -10,6 +10,7 @@ declare module '*lua-state.node' {
     getLength(path: string): number | null | undefined
     getVersion(): string
     setGlobal(name: string, value: LuaValue): this
+    setMemoryCallback(callback: function): boolean
   }
 
   export class LuaError extends Error {}
