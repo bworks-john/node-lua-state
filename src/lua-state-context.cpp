@@ -768,9 +768,10 @@ namespace {
     // fire cross-VM closure traversal notice
     if (ctx != nullptr) {
       ctx->OnContextSwitch(VMType::NAPI, VMType::LVM, cinfo);
-      if (cinfo != nullptr) {
-        free(cinfo);
-      }
+    }
+
+    if (cinfo != nullptr) {
+      free(cinfo);
     }
 
     if (function_call_status != LUA_OK) {
@@ -871,43 +872,53 @@ namespace {
     LuaStateContext* ctx = LuaStateContext::From(L);
     CrossVMCallBoundaryInfo* cinfo = (CrossVMCallBoundaryInfo*)malloc(sizeof(CrossVMCallBoundaryInfo));
 
+    Napi::Env env = js_function_holder->ref->Env();
+    Napi::HandleScope scope(env);
+
+    // cast lua arguments to javascript
+    int top_index = lua_gettop(L);
+
+    std::vector<napi_value> js_args;
+    js_args.reserve(top_index - 1);
+    for (int i = 2; i <= top_index; ++i) {
+      auto js_arg = ReadJsValueFromStack(L, env, i);
+      js_args.push_back(js_arg);
+    }
+
+    // prepare cross-VM closure information
+    if (cinfo != nullptr) {
+      cinfo->L = L;
+      cinfo->env = &env;
+    }
+
+    // fire cross-VM closure traversal notice
+    if (ctx != nullptr) {
+      ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+    } else {
+      fprintf(stderr, "WARN: can't find context for lua_State at %p!", L);
+    }
+
+    std::variant<Napi::Value, std::exception_ptr> result;
+
     try {
-      Napi::Env env = js_function_holder->ref->Env();
-      Napi::HandleScope scope(env);
+      // call js function from boundary
+      result = js_function_holder->ref->Call(js_args);
+    } catch (...) {
+      result = std::current_exception();
+    }
 
-      // cast lua arguments to javascript
-      int top_index = lua_gettop(L);
+    // fire cross-VM closure traversal notice
+    if (ctx != nullptr) {
+      ctx->OnContextSwitch(VMType::NAPI, VMType::LVM, cinfo);
+    }
 
-      std::vector<napi_value> js_args;
-      js_args.reserve(top_index - 1);
-      for (int i = 2; i <= top_index; ++i) {
-        auto js_arg = ReadJsValueFromStack(L, env, i);
-        js_args.push_back(js_arg);
-      }
+    // cleanup possibly dangling cinfo env
+    if (cinfo != nullptr) {
+      free(cinfo);
+    }
 
-      // prepare cross-VM closure information
-      if (cinfo != nullptr) {
-        cinfo->L = L;
-        cinfo->env = &env;
-      }
-
-      // fire cross-VM closure traversal notice
-      if (ctx != nullptr) {
-        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
-      } else {
-        fprintf(stderr, "WARN: can't find context for lua_State at %p!", L);
-      }
-
-      // call js function
-      Napi::Value js_function_result = js_function_holder->ref->Call(js_args);
-
-      // fire cross-VM closure traversal notice
-      if (ctx != nullptr) {
-        ctx->OnContextSwitch(VMType::NAPI, VMType::LVM, cinfo);
-        if (cinfo != nullptr) {
-          free(cinfo);
-        }
-      }
+    if (std::holds_alternative<Napi::Value>(result)) {
+      Napi::Value js_function_result = std::get<Napi::Value>(result);
 
       // return function call result to lua
       if (js_function_result.IsArray()) {
@@ -922,42 +933,48 @@ namespace {
         PushJsValueToStack(L, js_function_result);
         return 1;
       }
-    } catch (const Napi::Error& e) {
-      std::string msg;
-      auto stack_value = e.Get("stack");
+    } else if (std::holds_alternative<std::exception_ptr>(result)) {
+      std::exception_ptr ptr = std::get<std::exception_ptr>(result);
 
-      if (stack_value.IsString()) {
-        msg = stack_value.As<Napi::String>().Utf8Value();
-      } else {
-        auto name_value = e.Get("name");
-        std::string name = name_value.IsString() ? name_value.As<Napi::String>().Utf8Value() : "Error";
-        msg = name + ": " + e.Message();
-      }
+      try {
+        std::rethrow_exception(ptr);
+      } catch (const Napi::Error& e) {
+        std::string msg;
+        auto stack_value = e.Get("stack");
 
-      if (ctx != nullptr) {
-        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
-        if (cinfo != nullptr) {
-          free(cinfo);
+        if (stack_value.IsString()) {
+          msg = stack_value.As<Napi::String>().Utf8Value();
+        } else {
+          auto name_value = e.Get("name");
+          std::string name = name_value.IsString() ? name_value.As<Napi::String>().Utf8Value() : "Error";
+          msg = name + ": " + e.Message();
         }
-      }
 
-      return luaL_error(L, msg.c_str());
-    } catch (const std::exception& e) {
-      if (ctx != nullptr) {
-        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
-        if (cinfo != nullptr) {
-          free(cinfo);
+        if (ctx != nullptr) {
+          ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+          if (cinfo != nullptr) {
+            free(cinfo);
+          }
         }
-      }
-      return luaL_error(L, e.what());
-    } catch (...) {
-      if (ctx != nullptr) {
-        ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
-        if (cinfo != nullptr) {
-          free(cinfo);
+
+        return luaL_error(L, msg.c_str());
+      } catch (const std::exception& e) {
+        if (ctx != nullptr) {
+          ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+          if (cinfo != nullptr) {
+            free(cinfo);
+          }
         }
+        return luaL_error(L, e.what());
+      } catch (...) {
+        if (ctx != nullptr) {
+          ctx->OnContextSwitch(VMType::LVM, VMType::NAPI, cinfo);
+          if (cinfo != nullptr) {
+            free(cinfo);
+          }
+        }
+        return luaL_error(L, "unknown state from JS function");
       }
-      return luaL_error(L, "Unknown error from JS function");
     }
   }
 
