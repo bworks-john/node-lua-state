@@ -94,7 +94,8 @@ LuaStateContext::LuaStateContext(Napi::Env* env) {
       lua_sethook(this->L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].debug, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE, 1);
       contexts_[this->L_] = this;
     } else {
-      this->L_ = nullptr;
+      this->instanceId = -1;
+      this->Shutdown();
     }
   }
 }
@@ -102,16 +103,7 @@ LuaStateContext::LuaStateContext(Napi::Env* env) {
 /**
  * Destructor
  */
-LuaStateContext::~LuaStateContext() {
-  this->jsAllocatorFunc_ = nullptr;
-
-  if (this->L_ != nullptr) {
-    LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, nullptr, std::make_index_sequence<MAX_MMC_SLOTS>{});
-    contexts_.erase(this->L_);
-    lua_close(this->L_);
-    this->L_ = nullptr;
-  }
-}
+LuaStateContext::~LuaStateContext() { this->Shutdown(); }
 
 LuaStateContext* LuaStateContext::From(lua_State* L) {
   auto context = contexts_.find(L);
@@ -138,6 +130,21 @@ void LuaStateContext::OpenLibs(const std::optional<std::vector<std::string>>& li
     }
   } else {
     luaL_openlibs(this->L_);
+  }
+}
+
+void LuaStateContext::Shutdown() {
+  this->jsAllocatorFunc_ = nullptr;
+
+  if (this->L_ != nullptr) {
+    contexts_.erase(this->L_);
+    lua_close(this->L_);
+    this->L_ = nullptr;
+  }
+
+  if (this->instanceId >= 0) {
+    LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, nullptr, std::make_index_sequence<MAX_MMC_SLOTS>{});
+    this->instanceId = -1;
   }
 }
 
@@ -430,13 +437,10 @@ void* LuaStateContext::AllocateMemoryForLua(void* ud, void* ptr, size_t osize, s
 }
 
 int LuaStateContext::PanicFromLua(lua_State* state) {
-  if (this->L_ != nullptr) {
-    try {
-      lua_close(this->L_);
-    } catch (...) {
-      /* we do not care about this condition; things are already wrong! */
-    }
-    this->L_ = nullptr;
+  try {
+    this->Shutdown();
+  } catch (...) {
+    /* we do not care about this condition; things are already wrong! */
   }
 
   throw new PanicFromLuaException;
