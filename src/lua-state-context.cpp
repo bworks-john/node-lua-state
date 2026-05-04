@@ -59,7 +59,7 @@ void LuaStateContext::Init(Napi::Env env, Napi::Object _exports) {
 LuaStateContext::LuaStateContext(Napi::Env* env) {
 
   int i = LuaStateContext::nextId_ % MAX_MMC_SLOTS, k = 0, flag = 1;
-  while (flag == 1 && !(flag = 0) && k++ < MAX_MMC_SLOTS && i++ >= 0) {
+  while (flag == 1 && !(flag = 0) && k++ < MAX_MMC_SLOTS + 1 && (i++ % MAX_MMC_SLOTS >= 0)) {
     for (std::pair<lua_State* const, LuaStateContext*> it : LuaStateContext::contexts_) {
       if (it.second->instanceId == i) {
         flag = 1;
