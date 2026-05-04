@@ -88,14 +88,13 @@ LuaStateContext::LuaStateContext(Napi::Env* env) {
   this->jsAllocatorFunc_ = nullptr;
 
   if (LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, this, std::make_index_sequence<MAX_MMC_SLOTS>{})) {
-
-    L_ = lua_newstate(LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].alloc, this);
-    if (L_) {
-      lua_atpanic(L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].panic);
-      lua_sethook(L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].debug, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE, 1);
-      contexts_[L_] = this;
+    this->L_ = lua_newstate(LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].alloc, this);
+    if (this->L_) {
+      lua_atpanic(this->L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].panic);
+      lua_sethook(this->L_, LuaStateMemoryManagedContextHookFuncsTable[this->instanceId].debug, LUA_MASKCOUNT | LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE, 1);
+      contexts_[this->L_] = this;
     } else {
-      L_ = nullptr;
+      this->L_ = nullptr;
     }
   }
 }
@@ -106,11 +105,11 @@ LuaStateContext::LuaStateContext(Napi::Env* env) {
 LuaStateContext::~LuaStateContext() {
   this->jsAllocatorFunc_ = nullptr;
 
-  if (L_ != nullptr) {
+  if (this->L_ != nullptr) {
     LuaStateMemoryManagedContextHooks__TryAssignInstance(this->instanceId, nullptr, std::make_index_sequence<MAX_MMC_SLOTS>{});
-    contexts_.erase(L_);
-    lua_close(L_);
-    L_ = nullptr;
+    contexts_.erase(this->L_);
+    lua_close(this->L_);
+    this->L_ = nullptr;
   }
 }
 
@@ -132,58 +131,58 @@ void LuaStateContext::OpenLibs(const std::optional<std::vector<std::string>>& li
       if (lua_lib_function_map_item == lua_lib_functions_map.end()) {
         continue;
       }
-      luaL_requiref(L_, lib_for_open.c_str(), lua_lib_function_map_item->second, 1);
+      luaL_requiref(this->L_, lib_for_open.c_str(), lua_lib_function_map_item->second, 1);
       if (lib_for_open != "base") {
-        lua_pop(L_, 1);
+        lua_pop(this->L_, 1);
       }
     }
   } else {
-    luaL_openlibs(L_);
+    luaL_openlibs(this->L_);
   }
 }
 
 std::variant<Napi::Value, Napi::Error> LuaStateContext::EvalFile(const Napi::Env& env, const std::string& file_path) {
-  auto load_file_status = luaL_loadfile(L_, file_path.c_str());
+  auto load_file_status = luaL_loadfile(this->L_, file_path.c_str());
 
   if (load_file_status != LUA_OK) {
-    return PopErrorFromStack(L_, env);
+    return PopErrorFromStack(this->L_, env);
   }
 
-  return CallLuaFunctionOnStack(L_, env, 0);
+  return CallLuaFunctionOnStack(this->L_, env, 0);
 }
 
 std::variant<Napi::Value, Napi::Error> LuaStateContext::EvalString(const Napi::Env& env, const std::string& lua_code) {
-  auto load_string_status = luaL_loadstring(L_, lua_code.c_str());
+  auto load_string_status = luaL_loadstring(this->L_, lua_code.c_str());
 
   if (load_string_status != LUA_OK) {
-    return PopErrorFromStack(L_, env);
+    return PopErrorFromStack(this->L_, env);
   }
 
-  return CallLuaFunctionOnStack(L_, env, 0);
+  return CallLuaFunctionOnStack(this->L_, env, 0);
 }
 
 void LuaStateContext::SetLuaValue(const std::string& name, const Napi::Value& value) {
-  PushJsValueToStack(L_, value);
-  lua_setglobal(L_, name.c_str());
+  PushJsValueToStack(this->L_, value);
+  lua_setglobal(this->L_, name.c_str());
 }
 
 Napi::Value LuaStateContext::GetLuaValueByPath(const Napi::Env& env, const std::string& lua_value_path) {
-  auto push_lua_value_status = PushLuaValueByPathToStack(L_, lua_value_path);
+  auto push_lua_value_status = PushLuaValueByPathToStack(this->L_, lua_value_path);
   if (push_lua_value_status == PushLuaValueByPathToStackStatus::NotFound) {
     return env.Null();
   } else if (push_lua_value_status == PushLuaValueByPathToStackStatus::BrokenPath) {
     return env.Undefined();
   }
 
-  Napi::Value js_value = ReadJsValueFromStack(L_, env, -1);
+  Napi::Value js_value = ReadJsValueFromStack(this->L_, env, -1);
 
-  lua_pop(L_, 1);
+  lua_pop(this->L_, 1);
 
   return js_value;
 }
 
 Napi::Value LuaStateContext::GetLuaValueLengthByPath(const Napi::Env& env, const std::string& lua_value_path) {
-  auto push_lua_value_status = PushLuaValueByPathToStack(L_, lua_value_path);
+  auto push_lua_value_status = PushLuaValueByPathToStack(this->L_, lua_value_path);
   if (push_lua_value_status == PushLuaValueByPathToStackStatus::NotFound) {
     return env.Null();
   } else if (push_lua_value_status == PushLuaValueByPathToStackStatus::BrokenPath) {
@@ -191,18 +190,18 @@ Napi::Value LuaStateContext::GetLuaValueLengthByPath(const Napi::Env& env, const
   }
 
   Napi::Value result;
-  auto result_type = lua_type(L_, -1);
+  auto result_type = lua_type(this->L_, -1);
 
   if (result_type == LUA_TTABLE || result_type == LUA_TSTRING) {
-    lua_len(L_, -1);
-    int length = lua_tointeger(L_, -1);
-    lua_pop(L_, 1);
+    lua_len(this->L_, -1);
+    int length = lua_tointeger(this->L_, -1);
+    lua_pop(this->L_, 1);
     result = Napi::Number::New(env, length);
   } else {
     result = env.Undefined();
   }
 
-  lua_pop(L_, 1);
+  lua_pop(this->L_, 1);
 
   return result;
 }
@@ -220,9 +219,9 @@ std::string LuaStateContext::GetLuaVersion() {
   compileTime = "Lua (unknown version)";
 #endif
 
-  lua_getglobal(L_, "_VERSION");
-  std::string runtime = lua_tostring(L_, -1);
-  lua_pop(L_, 1);
+  lua_getglobal(this->L_, "_VERSION");
+  std::string runtime = lua_tostring(this->L_, -1);
+  lua_pop(this->L_, 1);
 
   if (runtime == compileTime || compileTime.find(runtime) != std::string::npos) {
     return compileTime;
@@ -234,7 +233,7 @@ std::string LuaStateContext::GetLuaVersion() {
 Napi::Function LuaStateContext::FindOrCreateJsFunction(const Napi::Env& env, int lua_stack_index) {
   std::lock_guard<std::mutex> lock(js_functions_cache_mtx_);
 
-  const void* lua_function_ptr = lua_topointer(L_, lua_stack_index);
+  const void* lua_function_ptr = lua_topointer(this->L_, lua_stack_index);
 
   // find function in cache
   {
@@ -843,7 +842,7 @@ namespace {
       {"math",    luaopen_math   },
       {"os",      luaopen_os     },
       {"package", luaopen_package},
-      {"string",  luaopen_string },
+      {"sring",   luaopen_string },
       {"table",   luaopen_table  },
     };
 
