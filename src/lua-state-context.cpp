@@ -770,8 +770,13 @@ namespace {
       fprintf(stderr, "WARN: can't find context for lua_State at %p!", L);
     }
 
-    // call lua function on stack
-    int function_call_status = lua_pcall(L, args_count, LUA_MULTRET, function_index);
+    std::variant<int, std::exception> result;
+    try {
+      // call lua function on stack
+      result = lua_pcall(L, args_count, LUA_MULTRET, function_index);
+    } catch (std::exception& any) {
+      result = any;
+    }
 
     // fire cross-VM closure traversal notice
     if (ctx != nullptr) {
@@ -782,31 +787,39 @@ namespace {
       free(cinfo);
     }
 
-    if (function_call_status != LUA_OK) {
-      return PopErrorFromStack(L, env);
-    }
+    if (std::holds_alternative<int>(result)) {
+      int function_call_status = std::get<int>(result);
 
-    // return result
-    int top_index = lua_gettop(L);
+      if (function_call_status != LUA_OK) {
+        return PopErrorFromStack(L, env);
+      }
 
-    int results_count = top_index - pivot_index;
+      // return result
+      int top_index = lua_gettop(L);
 
-    if (results_count == 0) {
-      return env.Undefined();
-    }
+      int results_count = top_index - pivot_index;
 
-    if (results_count == 1) {
-      Napi::Value result_value = ReadJsValueFromStack(L, env, -1);
+      if (results_count == 0) {
+        return env.Undefined();
+      }
+
+      if (results_count == 1) {
+        Napi::Value result_value = ReadJsValueFromStack(L, env, -1);
+        lua_settop(L, pivot_index);
+        return result_value;
+      }
+
+      Napi::Array result_array = Napi::Array::New(env, results_count);
+      for (int i = 0; i < results_count; ++i) {
+        result_array.Set(i, ReadJsValueFromStack(L, env, -results_count + i));
+      }
       lua_settop(L, pivot_index);
-      return result_value;
+      return result_array;
+    } else {
+      std::exception except = std::get<std::exception>(result);
+      Napi::Error::New(env, except.what()).ThrowAsJavaScriptException();
     }
-
-    Napi::Array result_array = Napi::Array::New(env, results_count);
-    for (int i = 0; i < results_count; ++i) {
-      result_array.Set(i, ReadJsValueFromStack(L, env, -results_count + i));
-    }
-    lua_settop(L, pivot_index);
-    return result_array;
+    return env.Undefined();
   }
 
   std::vector<std::string> SplitLuaPath(const std::string& path) {
