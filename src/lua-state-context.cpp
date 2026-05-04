@@ -366,74 +366,77 @@ int LuaStateContext::UpdateAccounting(size_t osize, size_t nsize) {
 void* LuaStateContext::AllocateMemoryForLua(void* ud, void* ptr, size_t osize, size_t nsize) {
   bool perform_allocation = true;
 
-  if (nsize > 0) {
-    if (this->jsAllocatorFunc_ != nullptr && !this->jsAllocatorFunc_->IsEmpty()) {
-      try {
-        Napi::Env env = this->jsAllocatorFunc_->Env();
-        Napi::HandleScope scope(env);
+  if (nsize <= 0) { /* LVM wants free */
+    free(ptr);      /* so let free() eat ptr back to heap */
+    return NULL;    /* and mark as free */
+  }
 
-        std::vector<napi_value> js_args;
-        js_args.push_back(Napi::Number::New(env, this->instanceId));
+  if (this->jsAllocatorFunc_ != nullptr && !this->jsAllocatorFunc_->IsEmpty()) {
+    try {
+      Napi::Env env = this->jsAllocatorFunc_->Env();
+      Napi::HandleScope scope(env);
 
-        js_args.push_back(Napi::BigInt::New(env, this->allocated_bytes));
-        js_args.push_back(Napi::BigInt::New(env, this->peak_allocated_bytes));
-        js_args.push_back(Napi::BigInt::New(env, this->max_permitted_bytes));
+      std::vector<napi_value> js_args;
+      js_args.push_back(Napi::Number::New(env, this->instanceId));
 
-        js_args.push_back(Napi::Number::New(env, nsize));
+      js_args.push_back(Napi::BigInt::New(env, this->allocated_bytes));
+      js_args.push_back(Napi::BigInt::New(env, this->peak_allocated_bytes));
+      js_args.push_back(Napi::BigInt::New(env, this->max_permitted_bytes));
 
-        Napi::Value js_function_result = this->jsAllocatorFunc_->Call(js_args);
+      js_args.push_back(Napi::Number::New(env, nsize));
 
-        if (js_function_result.IsBoolean()) {
-          Napi::Boolean js_allows_allocation = js_function_result.As<Napi::Boolean>();
-          perform_allocation = js_allows_allocation.Value();
-        } else {
-          perform_allocation = false;
-        }
-      } catch (const Napi::Error& e) {
-        std::string msg;
-        auto stack_value = e.Get("stack");
+      Napi::Value js_function_result = this->jsAllocatorFunc_->Call(js_args);
 
-        if (stack_value.IsString()) {
-          msg = stack_value.As<Napi::String>().Utf8Value();
-        } else {
-          auto name_value = e.Get("name");
-          std::string name = name_value.IsString() ? name_value.As<Napi::String>().Utf8Value() : "Error";
-          msg = name + ": " + e.Message();
-        }
-
-        fprintf(stderr, "failed to check allocation guard: %s", msg.c_str());
-        perform_allocation = false;
-      } catch (const std::exception& e) {
-        fprintf(stderr, "failed to check allocation guard: %s", e.what());
-        perform_allocation = false;
-      } catch (...) {
-        fprintf(stderr, "failed to check allocation guard: unspecified exception");
+      if (js_function_result.IsBoolean()) {
+        Napi::Boolean js_allows_allocation = js_function_result.As<Napi::Boolean>();
+        perform_allocation = js_allows_allocation.Value();
+      } else {
         perform_allocation = false;
       }
-    }
+    } catch (const Napi::Error& e) {
+      std::string msg;
+      auto stack_value = e.Get("stack");
 
-    if (perform_allocation) {
-      if (this->UpdateAccounting(osize, nsize) <= 0) {
-        perform_allocation = false;
+      if (stack_value.IsString()) {
+        msg = stack_value.As<Napi::String>().Utf8Value();
+      } else {
+        auto name_value = e.Get("name");
+        std::string name = name_value.IsString() ? name_value.As<Napi::String>().Utf8Value() : "Error";
+        msg = name + ": " + e.Message();
       }
+
+      fprintf(stderr, "failed to check allocation guard: %s", msg.c_str());
+      perform_allocation = false;
+    } catch (const std::exception& e) {
+      fprintf(stderr, "failed to check allocation guard: %s", e.what());
+      perform_allocation = false;
+    } catch (...) {
+      fprintf(stderr, "failed to check allocation guard: unspecified exception");
+      perform_allocation = false;
     }
-  } else {
-    perform_allocation = true;
   }
 
   if (perform_allocation) {
-    if (nsize == 0) {
-      free(ptr);
-      return NULL;
+    /* do fixed limit checks after ufunc call: */
+    if (this->UpdateAccounting(osize, nsize) <= 0) { /* really cooked now? */
+      perform_allocation = false;
+    }
+  }
+
+  if (perform_allocation) {
+    if (nsize == 0) { /* unreach: but here to catch whacky things! */
+      free(ptr);      /* let free() eat ptr */
+      return NULL;    /* return UNALLOC */
     } else {
       this->allocated_bytes += nsize;
-      void* mp = realloc(ptr, nsize);
-      return mp;
+      void* mp = realloc(ptr, nsize); /* maybe realloc? */
+      return mp;                      /* maybe new ptr or old ptr or UNALLOC? */
     }
   } else {
-    free(ptr);
-    return NULL;
+    free(ptr);   /* let free() eat ptr */
+    return NULL; /* return UNALLOC */
   }
+  return NULL; /* unreach */
 }
 
 int LuaStateContext::PanicFromLua(lua_State* state) {
