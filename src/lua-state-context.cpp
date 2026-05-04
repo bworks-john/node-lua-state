@@ -430,6 +430,15 @@ void* LuaStateContext::AllocateMemoryForLua(void* ud, void* ptr, size_t osize, s
 }
 
 int LuaStateContext::PanicFromLua(lua_State* state) {
+  if (this->L_ != nullptr) {
+    try {
+      lua_close(this->L_);
+    } catch (...) {
+      /* we do not care about this condition; things are already wrong! */
+    }
+    this->L_ = nullptr;
+  }
+
   throw new PanicFromLuaException;
   return 0; /* unreach */
 }
