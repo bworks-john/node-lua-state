@@ -1,5 +1,6 @@
 #include <napi.h>
 #include <string>
+#include <time.h>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -460,7 +461,7 @@ void LuaStateContext::OnContextSwitch(VMType origin, VMType target, CrossVMCallB
   if (origin == VMType::NAPI && target == VMType::LVM) {
     this->timer_reentrant_depth++;
     this->timer_running = true;
-    clock_gettime(CLOCK_MONOTONIC, &this->timer_last_start);
+    timespec_get(&this->timer_last_start, TIME_UTC);
   }
 
   if (origin == VMType::LVM && target == VMType::NAPI) {
@@ -470,7 +471,7 @@ void LuaStateContext::OnContextSwitch(VMType origin, VMType target, CrossVMCallB
 
     if (this->timer_running) {
       this->timer_running = false;
-      clock_gettime(CLOCK_MONOTONIC, &this->timer_last_stop);
+      timespec_get(&this->timer_last_stop, TIME_UTC);
 
       this->elapsed_seconds.tv_sec += this->timer_last_stop.tv_sec - this->timer_last_start.tv_sec;
       this->elapsed_seconds.tv_nsec += this->timer_last_stop.tv_nsec - this->timer_last_start.tv_nsec;

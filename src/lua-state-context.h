@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
