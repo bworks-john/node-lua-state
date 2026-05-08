@@ -2,7 +2,11 @@
   "configurations": [
     {
       "name": "Linux",
-      "includePath": ["/usr/local/include/**", "${workspaceFolder}/**"],
+      "includePath": [
+        "/usr/local/include/**",
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/tmp/**"
+      ],
       "defines": [],
       "cStandard": "c17",
       "cppStandard": "gnu++17",

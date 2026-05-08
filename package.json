@@ -71,7 +71,8 @@
   "dependencies": {
     "commander": "^14.0.2",
     "detect-libc": "^2.1.1",
-    "picomatch": "^4.0.3"
+    "picomatch": "^4.0.3",
+    "source": "^0.0.3"
   },
   "optionalDependencies": {
     "node-addon-api": "^8.5.0",

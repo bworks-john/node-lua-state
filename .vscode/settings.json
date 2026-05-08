@@ -7,5 +7,9 @@
   "editor.defaultFormatter": "biomejs.biome",
   "[markdown]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode"
+  },
+  "C_Cpp.default.compilerPath": "/usr/bin/g++",
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
   }
 }

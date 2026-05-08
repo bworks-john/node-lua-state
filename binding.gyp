@@ -32,7 +32,8 @@
         "-flto",
         "-fdata-sections",
         "-ffunction-sections",
-        "-fvisibility=hidden"
+        "-fvisibility=hidden",
+        "-g", "-O0"
       ],
       "cflags_cc+": [
         "-fexceptions",
@@ -40,13 +41,15 @@
         "-fdata-sections",
         "-ffunction-sections",
         "-fvisibility=hidden",
-        "-fvisibility-inlines-hidden"
+        "-fvisibility-inlines-hidden",
+        "-g", "-O0", "-fno-rtti"
       ],
+      'cflags_cc!': ['-fno-rtti'],
       "ldflags+": [ 
         "-flto",
         "-Wl,--gc-sections",
         "-Wl,--as-needed",
-        "-s"
+        "-g"
       ]
     }
   ]

@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "cppdbg",
+      "MIMode": "gdb",
+      "request": "launch",
+      "name": "Launch Program",
+      "program": "/usr/local/bin/node",
+      "cwd": "/home/node/lua-state",
+      "args": ["/usr/local/lib/node_modules/npm/bin/npm-cli.js", "run", "test"]
+    }
+  ]
+}

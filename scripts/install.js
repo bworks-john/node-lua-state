@@ -7,7 +7,7 @@ const logger = require('../build-tools/logger')
 const { NativeRelease, Binary } = require('../build-tools/config')
 const { fetchTarball } = require('../build-tools/artifact')
 
-async function install(luaVersion = LuaEnv.version) {
+async function install(luaVersion = LuaEnv.version, debugBuild = true) {
   try {
     LuaEnv.validate()
   } catch (error) {
@@ -31,7 +31,7 @@ async function install(luaVersion = LuaEnv.version) {
     return false
   }
 
-  if (!runNodeGyp(['rebuild', '--release'])) {
+  if (!runNodeGyp(['rebuild', debugBuild ? '--debug' : '--release'])) {
     logger.error('Built failed.')
     return false
   }
@@ -157,7 +157,7 @@ if (require.main === module) {
     process.exit(130)
   })
 
-  install()
+  install(undefined, true)
     .then((res) => {
       if (res) {
         logger.log(`Install successfully.`)
